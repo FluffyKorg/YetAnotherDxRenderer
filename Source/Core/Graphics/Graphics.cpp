@@ -433,7 +433,7 @@ void Graphics::OnResize() {
 		static_cast<LONG>(m_window->GetHeight()) };
 
 	// Update the aspect ratio and recompute the projection matrix.
-	DirectX::XMMATRIX P = DirectX::XMMatrixPerspectiveFovLH(0.25f*DirectX::XM_PI, 
+	DirectX::XMMATRIX P = DirectX::XMMatrixPerspectiveFovLH(0.25f*DirectX::XM_PI,
 		static_cast<float>(m_window->GetWidth()) / m_window->GetHeight(), 1.0f, 1000.0f);
 	XMStoreFloat4x4(&mProj, P);
 }
@@ -527,7 +527,7 @@ void Graphics::BuildBoxGeometry() {
 void Graphics::OnMouseDown(MouseButton button, int32 x, int32 y) {
     m_lastMousePos.x = x;
     m_lastMousePos.y = y;
-    
+
     SetCapture(static_cast<HWND>(m_window->GetNativeHandle()));
 }
 
@@ -595,7 +595,7 @@ void Graphics::BuildPSO() {
 void Graphics::LoadTextures() {
 	auto woodCrateTex = std::make_unique<Texture>();
 	woodCrateTex->name = "woodCrateTex";
-	woodCrateTex->filename = L"../../Textures/WoodCrate01.dds";
+	woodCrateTex->filename = L"Textures/WoodCrate01.dds";
 	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(m_device.Get(),
 		m_commandList.Get(), woodCrateTex->filename.c_str(),
 		woodCrateTex->resource, woodCrateTex->uploadHeap));

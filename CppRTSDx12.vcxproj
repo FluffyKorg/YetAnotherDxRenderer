@@ -106,7 +106,7 @@
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <AdditionalIncludeDirectories>C:\CPP\YetAnotherDxRenderer\Common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)/Common/</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -125,7 +125,7 @@
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <FloatingPointModel>Fast</FloatingPointModel>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <AdditionalIncludeDirectories>D:\CPP\CppRTSDx12\Common;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)/Common/</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -133,7 +133,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Common\WindowsPlatform.cpp" />
+    <ClCompile Include="Common\**\*.cpp" />
     <ClCompile Include="Source\Core\Application\Application.cpp" />
     <ClCompile Include="Source\Core\Application\Timer.cpp" />
     <ClCompile Include="Source\Core\Graphics\Graphics.cpp" />
@@ -141,6 +141,7 @@
     <ClCompile Include="WinMain.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Common\**\*.h" />
     <ClInclude Include="Source\Core\Application\Application.h" />
     <ClInclude Include="Source\Core\Application\Timer.h" />
     <ClInclude Include="Source\Core\Graphics\Graphics.h" />
