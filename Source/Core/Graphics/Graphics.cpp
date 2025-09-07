@@ -202,6 +202,9 @@ Graphics::Graphics(Window* wnd)
         { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
 
+	//Load Textures
+	LoadTextures();
+
 	// Build geometry
 	BuildBoxGeometry();
 
@@ -587,4 +590,15 @@ void Graphics::BuildPSO() {
     psoDesc.SampleDesc.Quality = m_4xMsaaState ? (m_4xMsaaQuality - 1) : 0;
     psoDesc.DSVFormat = m_depthStencilFormat;
     ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_PSO)));
+}
+
+void Graphics::LoadTextures() {
+	auto woodCrateTex = std::make_unique<Texture>();
+	woodCrateTex->name = "woodCrateTex";
+	woodCrateTex->filename = L"../../Textures/WoodCrate01.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(m_device.Get(),
+		m_commandList.Get(), woodCrateTex->filename.c_str(),
+		woodCrateTex->resource, woodCrateTex->uploadHeap));
+
+	m_textures[woodCrateTex->name] = std::move(woodCrateTex);
 }
