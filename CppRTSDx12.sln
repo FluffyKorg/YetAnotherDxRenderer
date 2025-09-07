@@ -8,10 +8,11 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Common", "Common", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
 	ProjectSection(SolutionItems) = preProject
 		Common\d3dx12.h = Common\d3dx12.h
+		Common\DDSTextureLoader.cpp = Common\DDSTextureLoader.cpp
+		Common\DDSTextureLoader.h = Common\DDSTextureLoader.h
 		Common\Types.h = Common\Types.h
 		Common\UploadBuffer.h = Common\UploadBuffer.h
 		Common\WindowsPlatform.cpp = Common\WindowsPlatform.cpp
-		Source\Platform\Windows\WindowsPlatform.h = Source\Platform\Windows\WindowsPlatform.h
 		Common\WindowsPlatform.h = Common\WindowsPlatform.h
 	EndProjectSection
 EndProject

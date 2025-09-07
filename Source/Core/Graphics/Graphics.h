@@ -52,6 +52,9 @@ private:
 	void BuildBoxGeometry();
     void BuildPSO();
 
+    // Textures
+
+    void LoadTextures();
 
 private:
 	Window* m_window = nullptr;
@@ -66,6 +69,8 @@ private:
     ComPtr<ID3D12Resource> m_depthStencilBuffer;
 
 	ComPtr<ID3D12PipelineState> m_PSO = nullptr;
+
+    HashMap<String, UniquePtr<Texture>> m_textures;
 
     // Core D3D12 objects
     ComPtr<ID3D12Device> m_device;

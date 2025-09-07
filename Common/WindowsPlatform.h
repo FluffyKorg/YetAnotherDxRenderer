@@ -15,6 +15,7 @@
 #include <DirectXMath.h>
 #include <DirectXColors.h>
 #include <DirectXCollision.h>
+#include <DDSTextureLoader.h> 
 
 // Link necessary d3d12 libraries.
 #pragma comment(lib,"d3dcompiler.lib")
@@ -219,6 +220,16 @@ struct MeshGeometry {
 	}
 };
 
+struct Texture {
+    // Unique material name for lookup.
+    String name;
+
+    WString filename;
+
+    ComPtr<ID3D12Resource> resource = nullptr;
+    ComPtr<ID3D12Resource> uploadHeap = nullptr;
+};
+
 // Error checking macros
 #define THROW_IF_FAILED(hr, function) \
     do { \
@@ -246,3 +257,4 @@ namespace Platform {
     void ShowMessageBox(const String& title, const String& message);
     void OutputDebugMessage(const String& message);
 }
+
