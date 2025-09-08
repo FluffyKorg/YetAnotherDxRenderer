@@ -2,7 +2,6 @@
 
 #include "../../Core/Window/Window.h"
 #include "WindowsPlatform.h"
-#include <array>
 
 class Win32Window : public Window {
 public:
@@ -35,6 +34,7 @@ public:
     void SetMouseWheelEventCallback(MouseWheelEventCallback callback) override { m_mouseWheelEventCallback = callback; }
     void SetWindowResizeEventCallback(WindowResizeEventCallback callback) override { m_windowResizeEventCallback = callback; }
     void SetWindowCloseEventCallback(WindowCloseEventCallback callback) override { m_windowCloseEventCallback = callback; }
+    void SetWindowPauseEventCallback(WindowPauseEventCallback callback) override { m_windowPauseEventCallback = callback; }
 
 	static Win32Window* GetInstance() { return s_winInstance; }
 
@@ -74,6 +74,7 @@ private:
     MouseWheelEventCallback m_mouseWheelEventCallback;
     WindowResizeEventCallback m_windowResizeEventCallback;
     WindowCloseEventCallback m_windowCloseEventCallback;
+	WindowPauseEventCallback m_windowPauseEventCallback;
 
     // Window class
     static const wchar_t* s_windowClassName;

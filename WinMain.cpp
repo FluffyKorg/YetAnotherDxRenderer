@@ -54,8 +54,6 @@ protected:
     }
 
     void OnWindowResize(uint32 width, uint32 height) override {
-        Platform::OutputDebugMessage("Window resized to " +
-            std::to_string(width) + "x" + std::to_string(height) + "\n");
     }
 
     void OnKeyEvent(const KeyEvent& event) override {

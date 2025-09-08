@@ -35,14 +35,15 @@ public:
     Graphics& operator=(Graphics&&) = delete;
 
 	void Update(float32 deltaTime);
+	void UpdateCamera(float32 deltaTime);
     void DrawFrame();
-    
+
     void OnMouseDown(MouseButton button, int32 x, int32 y);
     void OnMouseUp(MouseButton button, int32 x, int32 y);
     void OnMouseMove(int32 x, int32 y);
 
-private:
 	void OnResize();
+private:
 	void FlushCommandQueue();
 
     ID3D12Resource* CurrentBackBuffer() const;
@@ -111,6 +112,8 @@ private:
     DirectX::XMFLOAT4X4 mWorld = Identity4x4();
     DirectX::XMFLOAT4X4 mView = Identity4x4();
     DirectX::XMFLOAT4X4 mProj = Identity4x4();
+
+	DirectX::XMFLOAT3 m_eyePos = { 0.0f, 0.0f, 0.0f };
 
     float mTheta = 1.5f*DirectX::XM_PI;
     float mPhi = DirectX::XM_PIDIV4;

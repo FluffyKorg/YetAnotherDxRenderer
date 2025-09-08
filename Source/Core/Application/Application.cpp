@@ -120,6 +120,17 @@ void Application::SetupEventCallbacks() {
             HandleMouseWheelEvent(event);
         }
     );
+
+    m_window->SetWindowPauseEventCallback(
+        [this](bool paused) {
+            SetPaused(paused);
+            if (paused) {
+                m_timer.Stop();
+            } else {
+                m_timer.Start();
+            }
+        }
+    );
 }
 
 void Application::MainLoop() {
@@ -138,9 +149,13 @@ void Application::MainLoop() {
         // Update timer
         m_timer.Tick();
 
-        // Update and render
-        Update();
-        Render();
+        if (!m_isAppPaused) {
+			// Update and render
+			Update();
+			Render();
+        } else {
+            Sleep(100);
+		}
     }
 
     Platform::OutputDebugMessage("Exiting main loop - shouldExit: " +
@@ -168,8 +183,9 @@ void Application::Render() {
 }
 
 void Application::HandleWindowResize(const WindowResizeEvent& event) {
-    Platform::OutputDebugMessage("Window resize: " +
-        std::to_string(event.width) + "x" + std::to_string(event.height) + "\n");
+    if (m_graphics) {
+        m_graphics->OnResize();
+	}
 
     OnWindowResize(event.width, event.height);
 }

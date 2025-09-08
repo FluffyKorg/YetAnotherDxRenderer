@@ -243,27 +243,31 @@ void Graphics::FlushCommandQueue() {
 }
 
 void Graphics::Update(float32 deltaTime) {
-    // Convert Spherical to Cartesian coordinates.
-    float x = mRadius*sinf(mPhi)*cosf(mTheta);
-    float z = mRadius*sinf(mPhi)*sinf(mTheta);
-    float y = mRadius*cosf(mPhi);
-
-    // Build the view matrix.
-    DirectX::XMVECTOR pos = DirectX::XMVectorSet(x, y, z, 1.0f);
-    DirectX::XMVECTOR target = DirectX::XMVectorZero();
-    DirectX::XMVECTOR up = DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-
-    DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH(pos, target, up);
-    XMStoreFloat4x4(&mView, view);
+	UpdateCamera(deltaTime);
 
     DirectX::XMMATRIX world = XMLoadFloat4x4(&mWorld);
     DirectX::XMMATRIX proj = XMLoadFloat4x4(&mProj);
-    DirectX::XMMATRIX worldViewProj = world*view*proj;
+    DirectX::XMMATRIX worldViewProj = world*DirectX::XMLoadFloat4x4(&mView)*proj;
 
 	// Update the constant buffer with the latest worldViewProj matrix.
 	ObjectConstants objConstants;
     XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
     m_objectCB->CopyData(0, objConstants);
+}
+
+void Graphics::UpdateCamera(float32 deltaTime) {
+	// Convert Spherical to Cartesian coordinates.
+	m_eyePos.x = mRadius*sinf(mPhi)*cosf(mTheta);
+	m_eyePos.z = mRadius*sinf(mPhi)*sinf(mTheta);
+	m_eyePos.y = mRadius*cosf(mPhi);
+
+	// Build the view matrix.
+	DirectX::XMVECTOR pos = DirectX::XMVectorSet(m_eyePos.x, m_eyePos.y, m_eyePos.z, 1.0f);
+	DirectX::XMVECTOR target = DirectX::XMVectorZero();
+	DirectX::XMVECTOR up = DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+	DirectX::XMMATRIX view = DirectX::XMMatrixLookAtLH(pos, target, up);
+	XMStoreFloat4x4(&mView, view);
 }
 
 void Graphics::DrawFrame() {

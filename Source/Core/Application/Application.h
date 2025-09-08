@@ -30,6 +30,7 @@ public:
     // Application control
     void RequestExit() { m_shouldExit = true; }
     bool ShouldExit() const { return m_shouldExit; }
+	void SetPaused(bool paused) { m_isAppPaused = paused; }
 
     // Accessors
     Window* GetWindow() const { return m_window.get(); }
@@ -72,10 +73,11 @@ private:
     ApplicationConfig m_config;
     bool m_initialized = false;
     bool m_shouldExit = false;
+	bool m_isAppPaused = false;
 
     // Core systems
-    UniquePtr<Window> m_window;
-	UniquePtr<Graphics> m_graphics;
+    UniquePtr<Window> m_window = nullptr;
+	UniquePtr<Graphics> m_graphics = nullptr;
     Timer m_timer;
 
     // Static instance
@@ -83,7 +85,6 @@ private:
 };
 
 // Macro for creating application entry point
-#include <windows.h>
 #define IMPLEMENT_APPLICATION(AppClass) \
     int CALLBACK WinMain( \
     _In_ HINSTANCE hInstance, \

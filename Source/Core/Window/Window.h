@@ -70,6 +70,7 @@ using MouseMoveEventCallback = Function<void(const MouseMoveEvent&)>;
 using MouseWheelEventCallback = Function<void(const MouseWheelEvent&)>;
 using WindowResizeEventCallback = Function<void(const WindowResizeEvent&)>;
 using WindowCloseEventCallback = Function<void()>;
+using WindowPauseEventCallback = Function<void(bool paused)>;
 
 // Window description
 struct WindowDesc {
@@ -112,6 +113,7 @@ public:
     virtual void SetMouseWheelEventCallback(MouseWheelEventCallback callback) = 0;
     virtual void SetWindowResizeEventCallback(WindowResizeEventCallback callback) = 0;
     virtual void SetWindowCloseEventCallback(WindowCloseEventCallback callback) = 0;
+    virtual void SetWindowPauseEventCallback(WindowPauseEventCallback callback) = 0;
 
     // Factory method
     static UniquePtr<Window> Create();

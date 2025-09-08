@@ -180,14 +180,36 @@ LRESULT Win32Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (width != m_width || height != m_height) {
                 m_width = width;
                 m_height = height;
-
-                if (m_windowResizeEventCallback) {
-                    WindowResizeEvent event{ width, height };
-                    m_windowResizeEventCallback(event);
-                }
             }
             return 0;
         }
+
+	    // WM_ENTERSIZEMOVE is sent when the user grabs the resize bars.
+		case WM_ENTERSIZEMOVE:
+			if (m_windowPauseEventCallback) {
+				m_windowPauseEventCallback(true);
+			}
+			return 0;
+
+		// WM_EXITSIZEMOVE is sent when the user releases the resize bars.
+		// Here we reset everything based on the new window dimensions.
+		case WM_EXITSIZEMOVE:
+			if (m_windowPauseEventCallback) {
+				m_windowPauseEventCallback(false);
+			}
+			if (m_windowResizeEventCallback) {
+				WindowResizeEvent event{ m_width, m_height };
+				m_windowResizeEventCallback(event);
+			}
+			return 0;
+
+		// WM_ACTIVATE is sent when the window gains or loses focus
+		case WM_ACTIVATE:
+			if (m_windowPauseEventCallback) {
+				bool paused = (LOWORD(wParam) == WA_INACTIVE);
+				m_windowPauseEventCallback(paused);
+			}
+			return 0;
 
         case WM_KEYDOWN:
         case WM_KEYUP: {
