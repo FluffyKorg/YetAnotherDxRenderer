@@ -4,6 +4,9 @@
 #include "../../Core/Window/Window.h"
 #include "../../Platform/Windows/Win32Window.h"
 #include <DirectXMath.h> // in Math helper?
+#include <ResourceManager.h>
+#include <StaticMesh.h>
+#include <RenderObject.h>
 
 static DirectX::XMFLOAT4X4 Identity4x4() {
 	static DirectX::XMFLOAT4X4 I(
@@ -15,18 +18,20 @@ static DirectX::XMFLOAT4X4 Identity4x4() {
 	return I;
 }
 
-struct Vertex {
+// Legacy vertex structure for old code
+struct LegacyVertex {
     DirectX::XMFLOAT3 Pos;
     DirectX::XMFLOAT4 Color;
 };
 
-struct ObjectConstants {
-    DirectX::XMFLOAT4X4 WorldViewProj = Identity4x4();
-};
+// ObjectConstants now defined in RenderObject.h
 
 class Graphics {
 public:
     Graphics(Window* wnd);
+    void CacheDescSizes();
+    void CreateRTVandDSVdescHeaps();
+    void CreateSwapChain(Window* wnd);
     ~Graphics() = default;
 
     Graphics(const Graphics&) = delete;
@@ -44,7 +49,11 @@ public:
 
 	void OnResize();
 private:
+    void CreateDevice();
+    void CheckMSAAqual();
+    void EnableDebugLayer();
 	void FlushCommandQueue();
+    void CreateCommandObjects();
 
     ID3D12Resource* CurrentBackBuffer() const;
 	D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView() const;
@@ -56,13 +65,18 @@ private:
     // Textures
 
     void LoadTextures();
+    std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
 private:
 	Window* m_window = nullptr;
 
-	UniquePtr<UploadBuffer<ObjectConstants>> m_objectCB = nullptr;
+	// New render system
+	UniquePtr<ResourceManager> m_resourceManager;
+	UniquePtr<StaticMesh> m_boxObject;
 
-	UniquePtr<MeshGeometry> m_boxGeo = nullptr;
+	// Legacy - will be removed after full migration
+	UniquePtr<UploadBuffer<ObjectConstants>> m_objectCB;
+	UniquePtr<MeshGeometry> m_boxGeo;
 
 	int m_currBackBuffer = 0;
     static const int m_swapChainBufferCount = 2;

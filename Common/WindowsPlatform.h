@@ -15,7 +15,7 @@
 #include <DirectXMath.h>
 #include <DirectXColors.h>
 #include <DirectXCollision.h>
-#include <DDSTextureLoader.h> 
+#include <DDSTextureLoader.h>
 
 // Link necessary d3d12 libraries.
 #pragma comment(lib,"d3dcompiler.lib")
@@ -31,20 +31,20 @@ using ComPtr = Microsoft::WRL::ComPtr<T>;
 class ScopedHandle {
 public:
     ScopedHandle() noexcept : m_handle(nullptr) {}
-    
+
     explicit ScopedHandle(HANDLE handle) noexcept : m_handle(handle) {}
-    
+
     ~ScopedHandle() {
         if (m_handle && m_handle != INVALID_HANDLE_VALUE) {
             ::CloseHandle(m_handle);
         }
     }
-    
+
     // Move constructor
     ScopedHandle(ScopedHandle&& other) noexcept : m_handle(other.m_handle) {
         other.m_handle = nullptr;
     }
-    
+
     // Move assignment
     ScopedHandle& operator=(ScopedHandle&& other) noexcept {
         if (this != &other) {
@@ -56,17 +56,17 @@ public:
         }
         return *this;
     }
-    
+
     // Delete copy operations
     ScopedHandle(const ScopedHandle&) = delete;
     ScopedHandle& operator=(const ScopedHandle&) = delete;
-    
+
     HANDLE get() const noexcept { return m_handle; }
-    
+
     bool isValid() const noexcept {
         return m_handle != nullptr && m_handle != INVALID_HANDLE_VALUE;
     }
-    
+
 private:
     HANDLE m_handle;
 };
@@ -192,8 +192,7 @@ struct MeshGeometry {
 	// the Submeshes individually.
 	HashMap<std::string, SubmeshGeometry> DrawArgs;
 
-	D3D12_VERTEX_BUFFER_VIEW VertexBufferView()const
-	{
+	D3D12_VERTEX_BUFFER_VIEW VertexBufferView() const {
 		D3D12_VERTEX_BUFFER_VIEW vbv;
 		vbv.BufferLocation = VertexBufferGPU->GetGPUVirtualAddress();
 		vbv.StrideInBytes = VertexByteStride;
@@ -202,8 +201,7 @@ struct MeshGeometry {
 		return vbv;
 	}
 
-	D3D12_INDEX_BUFFER_VIEW IndexBufferView()const
-	{
+	D3D12_INDEX_BUFFER_VIEW IndexBufferView() const {
 		D3D12_INDEX_BUFFER_VIEW ibv;
 		ibv.BufferLocation = IndexBufferGPU->GetGPUVirtualAddress();
 		ibv.Format = IndexFormat;
@@ -213,8 +211,7 @@ struct MeshGeometry {
 	}
 
 	// We can free this memory after we finish upload to the GPU.
-	void DisposeUploaders()
-	{
+	void DisposeUploaders() {
 		VertexBufferUploader = nullptr;
 		IndexBufferUploader = nullptr;
 	}

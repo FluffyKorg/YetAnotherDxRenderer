@@ -5,59 +5,204 @@ Graphics::Graphics(Window* wnd)
 	: m_window(wnd) {
 	Platform::OutputDebugMessage("Initializing Graphics...\n");
 
-// Enable the D3D12 debug layer.
 #if defined(DEBUG) || defined(_DEBUG)
-{
-	ComPtr<ID3D12Debug> debugController;
-	THROW_IF_FAILED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)), __FUNCTION__);
-	debugController->EnableDebugLayer();
-}
+	EnableDebugLayer();
 #endif
 	THROW_IF_FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&m_dxgiFactory)), __FUNCTION__);
 
-    // Find hardware adapter
-    ComPtr<IDXGIAdapter1> adapter;
-    for (UINT adapterIndex = 0;
-        SUCCEEDED(m_dxgiFactory->EnumAdapters1(adapterIndex, &adapter));
-        ++adapterIndex) {
-
-        DXGI_ADAPTER_DESC1 desc;
-        adapter->GetDesc1(&desc);
-
-        // Skip software adapters
-        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
-            continue;
-        }
-
-        // Try to create device with this adapter
-        if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&m_device)))) {
-            Platform::OutputDebugMessage("D3D12 device created successfully\n");
-        }
-    }
+	CreateDevice();
 
 	THROW_IF_FAILED(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
 		IID_PPV_ARGS(&m_fence)), __FUNCTION__);
 
-	m_rtvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-	m_dsvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-	m_cbvSrvUavDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	// Descriptor sizes can vary across GPUs so we need to query
+	// this information. We cache the descriptor sizes so that it
+	// is available when we need it for various descriptor types.
+	CacheDescSizes();
 
     // Check 4X MSAA quality support for our back buffer format.
     // All Direct3D 11 capable devices support 4X MSAA for all render
     // target formats, so we only need to check quality support.
-	D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS msQualityLevels;
-	msQualityLevels.Format = m_backBufferFormat;
-	msQualityLevels.SampleCount = 4;
-	msQualityLevels.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
-	msQualityLevels.NumQualityLevels = 0;
-	THROW_IF_FAILED(m_device->CheckFeatureSupport(
-		D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
-		&msQualityLevels,
-		sizeof(msQualityLevels)), __FUNCTION__);
-    m_4xMsaaQuality = msQualityLevels.NumQualityLevels;
-	assert(m_4xMsaaQuality > 0 && "Unexpected MSAA quality level.");
+	CheckMSAAqual();
 
-	// Create Command Objects
+	// Creation of command queue, command allocator and command list
+	CreateCommandObjects();
+
+	CreateSwapChain(wnd);
+
+	// Create rtv and dsv descriptor heaps
+	CreateRTVandDSVdescHeaps();
+
+    // Do the initial resize code.
+    OnResize();
+
+    // Reset the command list to prep for initialization commands.
+    ThrowIfFailed(m_commandList->Reset(m_directCmdListAlloc.Get(), nullptr));
+
+	// Build the descriptor heaps for the scene.
+    D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc;
+    cbvHeapDesc.NumDescriptors = 2; // 1 CBV + 1 SRV for texture
+    cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	cbvHeapDesc.NodeMask = 0;
+    ThrowIfFailed(m_device->CreateDescriptorHeap(&cbvHeapDesc,
+        IID_PPV_ARGS(&m_cbvHeap)));
+
+	// Create root signature
+	//
+	// Shader programs typically require resources as input (constant buffers,
+	// textures, samplers).  The root signature defines the resources the shader
+	// programs expect.  If we think of the shader programs as a function, and
+	// the input resources as function parameters, then the root signature can be
+	// thought of as defining the function signature.
+
+	// Root parameter can be a table, root descriptor or root constants.
+	CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+
+	// Create a single descriptor table of CBVs.
+	CD3DX12_DESCRIPTOR_RANGE cbvTable;
+	cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
+	slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
+	
+	// Create SRV table for textures
+	CD3DX12_DESCRIPTOR_RANGE texTable;
+	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+	slotRootParameter[1].InitAsDescriptorTable(1, &texTable);
+
+	// Create samplers
+	auto staticSamplers = GetStaticSamplers();
+
+	// A root signature is an array of root parameters.
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, 
+		(UINT)staticSamplers.size(), staticSamplers.data(),
+		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	// create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
+	ComPtr<ID3DBlob> serializedRootSig = nullptr;
+	ComPtr<ID3DBlob> errorBlob = nullptr;
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+	if (errorBlob != nullptr) {
+		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	}
+	ThrowIfFailed(hr);
+
+	ThrowIfFailed(m_device->CreateRootSignature(
+		0,
+		serializedRootSig->GetBufferPointer(),
+		serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(&m_rootSignature)));
+
+	// Initialize ResourceManager
+	m_resourceManager = UniquePtr<ResourceManager>(new ResourceManager(m_device.Get(), m_commandList.Get()));
+
+	// Build shaders and input layout
+	m_vsByteCode = d3dUtil::CompileShader(L"Shaders\\texture.hlsl", nullptr, "VS", "vs_5_0");
+	m_psByteCode = d3dUtil::CompileShader(L"Shaders\\texture.hlsl", nullptr, "PS", "ps_5_0");
+    m_inputLayout = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+
+	//Load Textures
+	LoadTextures();
+
+	// Legacy geometry creation - commented out
+	// BuildBoxGeometry();
+
+	// Create box mesh with ResourceManager
+	auto boxMesh = m_resourceManager->CreateBoxMesh("box", 2.0f, 2.0f, 2.0f);
+
+	// Build PSO
+	BuildPSO();
+
+	// Store PSO in ResourceManager
+	m_resourceManager->AddPSO("default", m_PSO);
+
+	// Create render object
+	auto meshComponent = m_resourceManager->CreateMeshComponent("box");
+	auto materialComponent = m_resourceManager->CreateMaterial("default");
+
+	m_boxObject = UniquePtr<StaticMesh>(new StaticMesh(meshComponent, materialComponent, "box"));
+	m_boxObject->InitializeConstantBuffer(m_device.Get());
+
+	// Create descriptor for the new constant buffer
+	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+	D3D12_GPU_VIRTUAL_ADDRESS cbAddress = m_boxObject->GetConstantBufferAddress();
+
+	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+	cbvDesc.BufferLocation = cbAddress;
+	cbvDesc.SizeInBytes = objCBByteSize;
+
+	m_device->CreateConstantBufferView(
+		&cbvDesc,
+		m_cbvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    // Execute the initialization commands.
+    ThrowIfFailed(m_commandList->Close());
+	ID3D12CommandList* cmdsLists[] = { m_commandList.Get() };
+	m_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+
+    // Wait until initialization is complete.
+    FlushCommandQueue();
+}
+
+void Graphics::CacheDescSizes() {
+	m_rtvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	m_dsvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+	m_cbvSrvUavDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void Graphics::CreateRTVandDSVdescHeaps() {
+	// RTV descriptors describe render target resources
+	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc;
+	rtvHeapDesc.NumDescriptors = m_swapChainBufferCount;
+	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	rtvHeapDesc.NodeMask = 0;
+	THROW_IF_FAILED(m_device->CreateDescriptorHeap(
+		&rtvHeapDesc, IID_PPV_ARGS(m_rtvHeap.GetAddressOf())), __FUNCTION__);
+
+	//  DSV descriptors describe depth/stencil resources
+	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc;
+	dsvHeapDesc.NumDescriptors = 1;
+	dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	dsvHeapDesc.NodeMask = 0;
+	THROW_IF_FAILED(m_device->CreateDescriptorHeap(
+		&dsvHeapDesc, IID_PPV_ARGS(m_dsvHeap.GetAddressOf())), __FUNCTION__);
+}
+
+void Graphics::CreateSwapChain(Window* wnd) {
+	m_swapChain.Reset();
+
+	DXGI_SWAP_CHAIN_DESC sd;
+	sd.BufferDesc.Width = wnd->GetWidth();
+	sd.BufferDesc.Height = wnd->GetHeight();
+	sd.BufferDesc.RefreshRate.Numerator = 60;
+	sd.BufferDesc.RefreshRate.Denominator = 1;
+	sd.BufferDesc.Format = m_backBufferFormat;
+	sd.BufferDesc.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED;
+	sd.BufferDesc.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
+	sd.SampleDesc.Count = m_4xMsaaState ? 4 : 1;
+	sd.SampleDesc.Quality = m_4xMsaaState ? (m_4xMsaaQuality - 1) : 0;
+	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	sd.BufferCount = m_swapChainBufferCount;
+	sd.OutputWindow = static_cast<HWND>(wnd->GetNativeHandle());
+	sd.Windowed = true;
+	sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+
+	// Note: Swap chain uses queue to perform flush.
+	THROW_IF_FAILED(m_dxgiFactory->CreateSwapChain(
+		m_commandQueue.Get(),
+		&sd,
+		m_swapChain.GetAddressOf()), __FUNCTION__);
+}
+
+void Graphics::CreateCommandObjects() {
 	D3D12_COMMAND_QUEUE_DESC queueDesc = {}; // Command queue
 	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
@@ -79,145 +224,47 @@ Graphics::Graphics(Window* wnd)
 	// to the command list we will Reset it, and it needs to be closed before
 	// calling Reset.
 	m_commandList->Close();
+}
 
-	// Create swap chain
-    // Release the previous swapchain we will be recreating.
-    m_swapChain.Reset();
+void Graphics::CheckMSAAqual() {
+	D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS msQualityLevels;
+	msQualityLevels.Format = m_backBufferFormat;
+	msQualityLevels.SampleCount = 4;
+	msQualityLevels.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+	msQualityLevels.NumQualityLevels = 0;
+	THROW_IF_FAILED(m_device->CheckFeatureSupport(
+		D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+		&msQualityLevels,
+		sizeof(msQualityLevels)), __FUNCTION__);
+	m_4xMsaaQuality = msQualityLevels.NumQualityLevels;
+	assert(m_4xMsaaQuality > 0 && "Unexpected MSAA quality level.");
+}
 
-    DXGI_SWAP_CHAIN_DESC sd;
-    sd.BufferDesc.Width = wnd->GetWidth();
-    sd.BufferDesc.Height = wnd->GetHeight();
-    sd.BufferDesc.RefreshRate.Numerator = 60;
-    sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.BufferDesc.Format = m_backBufferFormat;
-    sd.BufferDesc.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED;
-    sd.BufferDesc.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
-    sd.SampleDesc.Count = m_4xMsaaState ? 4 : 1;
-    sd.SampleDesc.Quality = m_4xMsaaState ? (m_4xMsaaQuality - 1) : 0;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.BufferCount = m_swapChainBufferCount;
-    sd.OutputWindow = static_cast<HWND>(wnd->GetNativeHandle());
-    sd.Windowed = true;
-	sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+void Graphics::CreateDevice() {
+	ComPtr<IDXGIAdapter1> adapter;
+	for (UINT adapterIndex = 0;
+		SUCCEEDED(m_dxgiFactory->EnumAdapters1(adapterIndex, &adapter));
+		++adapterIndex) {
 
-	// Note: Swap chain uses queue to perform flush.
-    THROW_IF_FAILED(m_dxgiFactory->CreateSwapChain(
-		m_commandQueue.Get(),
-		&sd,
-		m_swapChain.GetAddressOf()), __FUNCTION__);
+		DXGI_ADAPTER_DESC1 desc;
+		adapter->GetDesc1(&desc);
 
-	// Create rtv and dsv descriptor heaps
-    // RTV descriptors describe render target resources
-    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc;
-    rtvHeapDesc.NumDescriptors = m_swapChainBufferCount;
-    rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-	rtvHeapDesc.NodeMask = 0;
-    THROW_IF_FAILED(m_device->CreateDescriptorHeap(
-        &rtvHeapDesc, IID_PPV_ARGS(m_rtvHeap.GetAddressOf())), __FUNCTION__);
+		// Skip software adapters
+		if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+			continue;
+		}
 
-    //  DSV descriptors describe depth/stencil resources
-    D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc;
-    dsvHeapDesc.NumDescriptors = 1;
-    dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-	dsvHeapDesc.NodeMask = 0;
-    THROW_IF_FAILED(m_device->CreateDescriptorHeap(
-        &dsvHeapDesc, IID_PPV_ARGS(m_dsvHeap.GetAddressOf())), __FUNCTION__);
-
-    // Do the initial resize code.
-    OnResize();
-
-    // Reset the command list to prep for initialization commands.
-    ThrowIfFailed(m_commandList->Reset(m_directCmdListAlloc.Get(), nullptr));
-
-	// Build the descriptor heaps for the scene.
-    D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc;
-    cbvHeapDesc.NumDescriptors = 1;
-    cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-	cbvHeapDesc.NodeMask = 0;
-    ThrowIfFailed(m_device->CreateDescriptorHeap(&cbvHeapDesc,
-        IID_PPV_ARGS(&m_cbvHeap)));
-
-	// Build constant buffers
-	m_objectCB = std::make_unique<UploadBuffer<ObjectConstants>>(m_device.Get(), 1, true);
-	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-	D3D12_GPU_VIRTUAL_ADDRESS cbAddress = m_objectCB->Resource()->GetGPUVirtualAddress();
-    // Offset to the ith object constant buffer in the buffer.
-    int boxCBufIndex = 0;
-	cbAddress += boxCBufIndex*objCBByteSize;
-
-	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
-	cbvDesc.BufferLocation = cbAddress;
-	cbvDesc.SizeInBytes = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-
-	m_device->CreateConstantBufferView(
-		&cbvDesc,
-		m_cbvHeap->GetCPUDescriptorHandleForHeapStart());
-
-	// Create root signature
-	//
-	// Shader programs typically require resources as input (constant buffers,
-	// textures, samplers).  The root signature defines the resources the shader
-	// programs expect.  If we think of the shader programs as a function, and
-	// the input resources as function parameters, then the root signature can be
-	// thought of as defining the function signature.
-
-	// Root parameter can be a table, root descriptor or root constants.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[1];
-
-	// Create a single descriptor table of CBVs.
-	CD3DX12_DESCRIPTOR_RANGE cbvTable;
-	cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
-	slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
-
-	// A root signature is an array of root parameters.
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(1, slotRootParameter, 0, nullptr,
-		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
-
-	// create a root signature with a single slot which points to a descriptor range consisting of a single constant buffer
-	ComPtr<ID3DBlob> serializedRootSig = nullptr;
-	ComPtr<ID3DBlob> errorBlob = nullptr;
-	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
-
-	if (errorBlob != nullptr) {
-		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+		// Try to create device with this adapter
+		if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&m_device)))) {
+			Platform::OutputDebugMessage("D3D12 device created successfully\n");
+		}
 	}
-	ThrowIfFailed(hr);
+}
 
-	ThrowIfFailed(m_device->CreateRootSignature(
-		0,
-		serializedRootSig->GetBufferPointer(),
-		serializedRootSig->GetBufferSize(),
-		IID_PPV_ARGS(&m_rootSignature)));
-
-	// Build shaders and input layout
-	m_vsByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
-	m_psByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
-    m_inputLayout = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
-    };
-
-	//Load Textures
-	LoadTextures();
-
-	// Build geometry
-	BuildBoxGeometry();
-
-	// Build PSO
-	BuildPSO();
-
-    // Execute the initialization commands.
-    ThrowIfFailed(m_commandList->Close());
-	ID3D12CommandList* cmdsLists[] = { m_commandList.Get() };
-	m_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
-
-    // Wait until initialization is complete.
-    FlushCommandQueue();
+void Graphics::EnableDebugLayer() {
+	ComPtr<ID3D12Debug> debugController;
+	THROW_IF_FAILED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)), __FUNCTION__);
+	debugController->EnableDebugLayer();
 }
 
 void Graphics::FlushCommandQueue() {
@@ -245,14 +292,27 @@ void Graphics::FlushCommandQueue() {
 void Graphics::Update(float32 deltaTime) {
 	UpdateCamera(deltaTime);
 
-    DirectX::XMMATRIX world = XMLoadFloat4x4(&mWorld);
-    DirectX::XMMATRIX proj = XMLoadFloat4x4(&mProj);
-    DirectX::XMMATRIX worldViewProj = world*DirectX::XMLoadFloat4x4(&mView)*proj;
+	DirectX::XMMATRIX view = DirectX::XMLoadFloat4x4(&mView);
+	DirectX::XMMATRIX proj = DirectX::XMLoadFloat4x4(&mProj);
 
-	// Update the constant buffer with the latest worldViewProj matrix.
+	// New render system
+	if (m_boxObject) {
+		// Test rotation - rotate the box over time
+		//static float angle = 0.0f;
+		//angle += deltaTime;
+		//m_boxObject->SetRotation(DirectX::XMFLOAT3(0.0f, angle, 0.0f));
+
+		m_boxObject->Update(deltaTime, view, proj);
+	}
+
+	// Legacy system - commented out
+	/*
+    DirectX::XMMATRIX world = XMLoadFloat4x4(&mWorld);
+    DirectX::XMMATRIX worldViewProj = world*view*proj;
 	ObjectConstants objConstants;
     XMStoreFloat4x4(&objConstants.WorldViewProj, XMMatrixTranspose(worldViewProj));
     m_objectCB->CopyData(0, objConstants);
+	*/
 }
 
 void Graphics::UpdateCamera(float32 deltaTime) {
@@ -301,6 +361,21 @@ void Graphics::DrawFrame() {
 
 	m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
+	// New render system
+	if (m_boxObject) {
+		// Bind the descriptor table for constant buffer
+		m_commandList->SetGraphicsRootDescriptorTable(0, m_cbvHeap->GetGPUDescriptorHandleForHeapStart());
+		
+		// Bind the descriptor table for texture SRV
+		CD3DX12_GPU_DESCRIPTOR_HANDLE tex(m_cbvHeap->GetGPUDescriptorHandleForHeapStart());
+		tex.Offset(1, m_cbvSrvUavDescriptorSize);
+		m_commandList->SetGraphicsRootDescriptorTable(1, tex);
+
+		m_boxObject->Render(m_commandList.Get());
+	}
+
+	// Legacy rendering - commented out
+	/*
 	D3D12_VERTEX_BUFFER_VIEW vbView = m_boxGeo->VertexBufferView();
 	D3D12_INDEX_BUFFER_VIEW ibView = m_boxGeo->IndexBufferView();
 	m_commandList->IASetVertexBuffers(0, 1, &vbView);
@@ -312,6 +387,7 @@ void Graphics::DrawFrame() {
     m_commandList->DrawIndexedInstanced(
 		m_boxGeo->DrawArgs["box"].IndexCount,
 		1, 0, 0, 0);
+	*/
 
     // Indicate a state transition on the resource usage.
 	CD3DX12_RESOURCE_BARRIER presentBarrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -458,16 +534,16 @@ D3D12_CPU_DESCRIPTOR_HANDLE Graphics::CurrentBackBufferView() const {
 }
 
 void Graphics::BuildBoxGeometry() {
-    std::array<Vertex, 8> vertices =
+    std::array<LegacyVertex, 8> vertices =
     {
-        Vertex({ DirectX::XMFLOAT3(-1.0f, -1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::White) }),
-		Vertex({ DirectX::XMFLOAT3(-1.0f, +1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::Black) }),
-		Vertex({ DirectX::XMFLOAT3(+1.0f, +1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::Red) }),
-		Vertex({ DirectX::XMFLOAT3(+1.0f, -1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::Green) }),
-		Vertex({ DirectX::XMFLOAT3(-1.0f, -1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Blue) }),
-		Vertex({ DirectX::XMFLOAT3(-1.0f, +1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Yellow) }),
-		Vertex({ DirectX::XMFLOAT3(+1.0f, +1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Cyan) }),
-		Vertex({ DirectX::XMFLOAT3(+1.0f, -1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Magenta) })
+        LegacyVertex({ DirectX::XMFLOAT3(-1.0f, -1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::White) }),
+		LegacyVertex({ DirectX::XMFLOAT3(-1.0f, +1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::Black) }),
+		LegacyVertex({ DirectX::XMFLOAT3(+1.0f, +1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::Red) }),
+		LegacyVertex({ DirectX::XMFLOAT3(+1.0f, -1.0f, -1.0f), DirectX::XMFLOAT4(DirectX::Colors::Green) }),
+		LegacyVertex({ DirectX::XMFLOAT3(-1.0f, -1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Blue) }),
+		LegacyVertex({ DirectX::XMFLOAT3(-1.0f, +1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Yellow) }),
+		LegacyVertex({ DirectX::XMFLOAT3(+1.0f, +1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Cyan) }),
+		LegacyVertex({ DirectX::XMFLOAT3(+1.0f, -1.0f, +1.0f), DirectX::XMFLOAT4(DirectX::Colors::Magenta) })
     };
 
 	std::array<std::uint16_t, 36> indices =
@@ -497,7 +573,7 @@ void Graphics::BuildBoxGeometry() {
 		4, 3, 7
 	};
 
-    const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+    const UINT vbByteSize = (UINT)vertices.size() * sizeof(LegacyVertex);
 	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
 
 	m_boxGeo = std::make_unique<MeshGeometry>();
@@ -515,7 +591,7 @@ void Graphics::BuildBoxGeometry() {
 	m_boxGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(m_device.Get(),
 		m_commandList.Get(), indices.data(), ibByteSize, m_boxGeo->IndexBufferUploader);
 
-	m_boxGeo->VertexByteStride = sizeof(Vertex);
+	m_boxGeo->VertexByteStride = sizeof(LegacyVertex);
 	m_boxGeo->VertexBufferByteSize = vbByteSize;
 	m_boxGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
 	m_boxGeo->IndexBufferByteSize = ibByteSize;
@@ -605,4 +681,70 @@ void Graphics::LoadTextures() {
 		woodCrateTex->resource, woodCrateTex->uploadHeap));
 
 	m_textures[woodCrateTex->name] = std::move(woodCrateTex);
+	
+	// Create SRV for the texture
+	CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptor(m_cbvHeap->GetCPUDescriptorHandleForHeapStart());
+	hDescriptor.Offset(1, m_cbvSrvUavDescriptorSize); // Offset by 1 to skip CBV
+	
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Format = m_textures["woodCrateTex"]->resource->GetDesc().Format;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MostDetailedMip = 0;
+	srvDesc.Texture2D.MipLevels = m_textures["woodCrateTex"]->resource->GetDesc().MipLevels;
+	
+	m_device->CreateShaderResourceView(m_textures["woodCrateTex"]->resource.Get(), &srvDesc, hDescriptor);
+}
+
+std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> Graphics::GetStaticSamplers() {
+	// Applications usually only need a handful of samplers. So just define them all up front
+	// and keep them available as part of the root signature.
+	
+	const CD3DX12_STATIC_SAMPLER_DESC pointWrap(
+		0, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_POINT, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC pointClamp(
+		1, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_POINT, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC linearWrap(
+		2, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_LINEAR, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC linearClamp(
+		3, // shaderRegister
+		D3D12_FILTER_MIN_MAG_MIP_LINEAR, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP); // addressW
+
+	const CD3DX12_STATIC_SAMPLER_DESC anisotropicWrap(
+		4, // shaderRegister
+		D3D12_FILTER_ANISOTROPIC, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,  // addressW
+		0.0f,                              // mipLODBias
+		8);                                // maxAnisotropy
+
+	const CD3DX12_STATIC_SAMPLER_DESC anisotropicClamp(
+		5, // shaderRegister
+		D3D12_FILTER_ANISOTROPIC, // filter
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressU
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressV
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP,  // addressW
+		0.0f,                               // mipLODBias
+		8);                                 // maxAnisotropy
+
+	return { pointWrap, pointClamp, linearWrap, linearClamp, anisotropicWrap, anisotropicClamp };
 }
