@@ -5,6 +5,11 @@ Graphics::Graphics(Window* wnd)
 	: m_window(wnd) {
 	Platform::OutputDebugMessage("Initializing Graphics...\n");
 
+	/* Code to initialize Direct3D 12. Code in this section can be
+	*  similar across many applications. In Dx12 book by Frank Luna
+	*  this code can be found in D3DApp::Initialize function and it
+	*  never changes between his samples.
+	*/
 #if defined(DEBUG) || defined(_DEBUG)
 	EnableDebugLayer();
 #endif
@@ -39,6 +44,13 @@ Graphics::Graphics(Window* wnd)
     // Reset the command list to prep for initialization commands.
     ThrowIfFailed(m_commandList->Reset(m_directCmdListAlloc.Get(), nullptr));
 
+	/*	This is the place where most of the sample specific code. In future i thought
+	*	this should be moved in Sceene abstaction class. App should have something like
+	*   SceneManager which manages multiple scenes. Each scene should create it's own
+	*   resources, PSOs, descriptor heaps etc.
+	*/
+	// Build frame resources first
+	BuildFrameResources();
 	// Build the descriptor heaps for the scene.
     D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc;
     cbvHeapDesc.NumDescriptors = 2; // 1 CBV + 1 SRV for texture
@@ -63,7 +75,7 @@ Graphics::Graphics(Window* wnd)
 	CD3DX12_DESCRIPTOR_RANGE cbvTable;
 	cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
 	slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
-	
+
 	// Create SRV table for textures
 	CD3DX12_DESCRIPTOR_RANGE texTable;
 	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
@@ -73,7 +85,7 @@ Graphics::Graphics(Window* wnd)
 	auto staticSamplers = GetStaticSamplers();
 
 	// A root signature is an array of root parameters.
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, 
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter,
 		(UINT)staticSamplers.size(), staticSamplers.data(),
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -109,36 +121,34 @@ Graphics::Graphics(Window* wnd)
 	//Load Textures
 	LoadTextures();
 
-	// Legacy geometry creation - commented out
-	// BuildBoxGeometry();
-
 	// Create box mesh with ResourceManager
 	auto boxMesh = m_resourceManager->CreateBoxMesh("box", 2.0f, 2.0f, 2.0f);
 
-	// Build PSO
-	BuildPSO();
-
-	// Store PSO in ResourceManager
-	m_resourceManager->AddPSO("default", m_PSO);
+	BuildPSOs();
 
 	// Create render object
 	auto meshComponent = m_resourceManager->CreateMeshComponent("box");
 	auto materialComponent = m_resourceManager->CreateMaterial("default");
 
 	m_boxObject = UniquePtr<StaticMesh>(new StaticMesh(meshComponent, materialComponent, "box"));
-	m_boxObject->InitializeConstantBuffer(m_device.Get());
+	// Don't initialize constant buffer here - we'll use frame resources
+	// Each frame resource has its own constant buffers
 
-	// Create descriptor for the new constant buffer
+	// Create descriptor for the frame resource constant buffer
+	// We'll bind the appropriate one during rendering
 	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-	D3D12_GPU_VIRTUAL_ADDRESS cbAddress = m_boxObject->GetConstantBufferAddress();
 
-	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
-	cbvDesc.BufferLocation = cbAddress;
-	cbvDesc.SizeInBytes = objCBByteSize;
+	// Create CBV for the first frame resource as initial setup
+	if (m_frameResources.size() > 0 && m_frameResources[0]->ObjectCB) {
+		D3D12_GPU_VIRTUAL_ADDRESS cbAddress = m_frameResources[0]->ObjectCB->Resource()->GetGPUVirtualAddress();
+		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+		cbvDesc.BufferLocation = cbAddress;
+		cbvDesc.SizeInBytes = objCBByteSize;
 
-	m_device->CreateConstantBufferView(
-		&cbvDesc,
-		m_cbvHeap->GetCPUDescriptorHandleForHeapStart());
+		m_device->CreateConstantBufferView(
+			&cbvDesc,
+			m_cbvHeap->GetCPUDescriptorHandleForHeapStart());
+	}
 
     // Execute the initialization commands.
     ThrowIfFailed(m_commandList->Close());
@@ -209,6 +219,7 @@ void Graphics::CreateCommandObjects() {
 	THROW_IF_FAILED(m_device->CreateCommandQueue(&queueDesc,
 		IID_PPV_ARGS(&m_commandQueue)), __FUNCTION__);
 
+	// Create main command allocator for initialization and resize operations
 	THROW_IF_FAILED(m_device->CreateCommandAllocator(
 		D3D12_COMMAND_LIST_TYPE_DIRECT,
 		IID_PPV_ARGS(m_directCmdListAlloc.GetAddressOf())), __FUNCTION__);
@@ -292,17 +303,58 @@ void Graphics::FlushCommandQueue() {
 void Graphics::Update(float32 deltaTime) {
 	UpdateCamera(deltaTime);
 
+	// Cycle through the circular frame resource array.
+	m_currFrameResourceIndex = (m_currFrameResourceIndex + 1) % NumFrameResources;
+	m_currFrameResource = m_frameResources[m_currFrameResourceIndex].get();
+
+	// Has the GPU finished processing the commands of the current frame resource?
+	// If not, wait until the GPU has completed commands up to this fence point.
+	if (m_currFrameResource->Fence != 0 && m_fence->GetCompletedValue() < m_currFrameResource->Fence) {
+		HANDLE eventHandle = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+		assert(eventHandle && "Failed to create event handle.");
+		ThrowIfFailed(m_fence->SetEventOnCompletion(m_currFrameResource->Fence, eventHandle));
+		WaitForSingleObject(eventHandle, INFINITE);
+		CloseHandle(eventHandle);
+	}
+
+	// Update object constant buffers
 	DirectX::XMMATRIX view = DirectX::XMLoadFloat4x4(&mView);
 	DirectX::XMMATRIX proj = DirectX::XMLoadFloat4x4(&mProj);
 
-	// New render system
-	if (m_boxObject) {
-		// Test rotation - rotate the box over time
-		//static float angle = 0.0f;
-		//angle += deltaTime;
-		//m_boxObject->SetRotation(DirectX::XMFLOAT3(0.0f, angle, 0.0f));
+	// Update the constant buffer for this frame
+	if (m_boxObject && m_currFrameResource->ObjectCB) {
+		DirectX::XMMATRIX world = DirectX::XMLoadFloat4x4(&m_boxObject->GetWorldMatrix());
+		DirectX::XMMATRIX worldViewProj = world * view * proj;
 
-		m_boxObject->Update(deltaTime, view, proj);
+		ObjectConstants objConstants;
+		DirectX::XMStoreFloat4x4(&objConstants.WorldViewProj, DirectX::XMMatrixTranspose(worldViewProj));
+		DirectX::XMStoreFloat4x4(&objConstants.World, DirectX::XMMatrixTranspose(world));
+
+		m_currFrameResource->ObjectCB->CopyData(0, objConstants);
+	}
+
+	// Update Pass constant buffer
+	if (m_currFrameResource->PassCB) {
+		PassConstants passConstants;
+		DirectX::XMStoreFloat4x4(&passConstants.View, DirectX::XMMatrixTranspose(view));
+		DirectX::XMVECTOR viewDet = DirectX::XMMatrixDeterminant(view);
+		DirectX::XMStoreFloat4x4(&passConstants.InvView, DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(&viewDet, view)));
+		DirectX::XMStoreFloat4x4(&passConstants.Proj, DirectX::XMMatrixTranspose(proj));
+		DirectX::XMVECTOR projDet = DirectX::XMMatrixDeterminant(proj);
+		DirectX::XMStoreFloat4x4(&passConstants.InvProj, DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(&projDet, proj)));
+		DirectX::XMMATRIX viewProj = view * proj;
+		DirectX::XMStoreFloat4x4(&passConstants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
+		DirectX::XMVECTOR viewProjDet = DirectX::XMMatrixDeterminant(viewProj);
+		DirectX::XMStoreFloat4x4(&passConstants.InvViewProj, DirectX::XMMatrixTranspose(DirectX::XMMatrixInverse(&viewProjDet, viewProj)));
+		passConstants.EyePosW = m_eyePos;
+		passConstants.RenderTargetSize = DirectX::XMFLOAT2((float)m_window->GetWidth(), (float)m_window->GetHeight());
+		passConstants.InvRenderTargetSize = DirectX::XMFLOAT2(1.0f / m_window->GetWidth(), 1.0f / m_window->GetHeight());
+		passConstants.NearZ = 1.0f;
+		passConstants.FarZ = 1000.0f;
+		passConstants.TotalTime = 0.0f; // You might want to track total time
+		passConstants.DeltaTime = deltaTime;
+
+		m_currFrameResource->PassCB->CopyData(0, passConstants);
 	}
 
 	// Legacy system - commented out
@@ -331,13 +383,16 @@ void Graphics::UpdateCamera(float32 deltaTime) {
 }
 
 void Graphics::DrawFrame() {
+	auto cmdListAlloc = m_currFrameResource->CmdListAlloc;
+
     // Reuse the memory associated with command recording.
     // We can only reset when the associated command lists have finished execution on the GPU.
-	ThrowIfFailed(m_directCmdListAlloc->Reset());
+	ThrowIfFailed(cmdListAlloc->Reset());
 
 	// A command list can be reset after it has been added to the command queue via ExecuteCommandList.
     // Reusing the command list reuses memory.
-    ThrowIfFailed(m_commandList->Reset(m_directCmdListAlloc.Get(), m_PSO.Get()));
+	ID3D12PipelineState* currentPSO = m_isWireframe ? m_wireframePSO.Get() : m_PSO.Get();
+    ThrowIfFailed(m_commandList->Reset(cmdListAlloc.Get(), currentPSO));
 
     m_commandList->RSSetViewports(1, &m_screenViewport);
     m_commandList->RSSetScissorRects(1, &m_scissorRect);
@@ -361,11 +416,21 @@ void Graphics::DrawFrame() {
 
 	m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
 
-	// New render system
-	if (m_boxObject) {
+	// New render system with frame resources
+	if (m_boxObject && m_currFrameResource->ObjectCB) {
+		// Update the CBV to point to the current frame resource's constant buffer
+		UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+		D3D12_GPU_VIRTUAL_ADDRESS cbAddress = m_currFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
+
+		// Create/Update the CBV for this frame
+		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+		cbvDesc.BufferLocation = cbAddress;
+		cbvDesc.SizeInBytes = objCBByteSize;
+		m_device->CreateConstantBufferView(&cbvDesc, m_cbvHeap->GetCPUDescriptorHandleForHeapStart());
+
 		// Bind the descriptor table for constant buffer
 		m_commandList->SetGraphicsRootDescriptorTable(0, m_cbvHeap->GetGPUDescriptorHandleForHeapStart());
-		
+
 		// Bind the descriptor table for texture SRV
 		CD3DX12_GPU_DESCRIPTOR_HANDLE tex(m_cbvHeap->GetGPUDescriptorHandleForHeapStart());
 		tex.Offset(1, m_cbvSrvUavDescriptorSize);
@@ -373,21 +438,6 @@ void Graphics::DrawFrame() {
 
 		m_boxObject->Render(m_commandList.Get());
 	}
-
-	// Legacy rendering - commented out
-	/*
-	D3D12_VERTEX_BUFFER_VIEW vbView = m_boxGeo->VertexBufferView();
-	D3D12_INDEX_BUFFER_VIEW ibView = m_boxGeo->IndexBufferView();
-	m_commandList->IASetVertexBuffers(0, 1, &vbView);
-	m_commandList->IASetIndexBuffer(&ibView);
-    m_commandList->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    m_commandList->SetGraphicsRootDescriptorTable(0, m_cbvHeap->GetGPUDescriptorHandleForHeapStart());
-
-    m_commandList->DrawIndexedInstanced(
-		m_boxGeo->DrawArgs["box"].IndexCount,
-		1, 0, 0, 0);
-	*/
 
     // Indicate a state transition on the resource usage.
 	CD3DX12_RESOURCE_BARRIER presentBarrier = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -405,21 +455,24 @@ void Graphics::DrawFrame() {
 	ThrowIfFailed(m_swapChain->Present(0, 0));
 	m_currBackBuffer = (m_currBackBuffer + 1) % m_swapChainBufferCount;
 
-	// Wait until frame commands are complete.  This waiting is inefficient and is
-	// done for simplicity.  Later we will show how to organize our rendering code
-	// so we do not have to wait per frame.
-	FlushCommandQueue();
+	// Advance the fence value to mark commands up to this fence point.
+	m_currFrameResource->Fence = ++m_currentFence;
+
+	// Add an instruction to the command queue to set a new fence point.
+	// Because we are on the GPU timeline, the new fence point won't be
+	// set until the GPU finishes processing all the commands prior to this Signal().
+	m_commandQueue->Signal(m_fence.Get(), m_currentFence);
 }
 
 void Graphics::OnResize() {
 	assert(m_device);
 	assert(m_swapChain);
-    assert(m_directCmdListAlloc);
+	assert(m_directCmdListAlloc);
 
 	// Flush before changing any resources.
 	FlushCommandQueue();
 
-    ThrowIfFailed(m_commandList->Reset(m_directCmdListAlloc.Get(), nullptr));
+	ThrowIfFailed(m_commandList->Reset(m_directCmdListAlloc.Get(), nullptr));
 
 	// Release the previous resources we will be recreating.
 	for (int i = 0; i < m_swapChainBufferCount; ++i) {
@@ -644,7 +697,13 @@ void Graphics::OnMouseMove(int32 x, int32 y) {
     m_lastMousePos.y = y;
 }
 
-void Graphics::BuildPSO() {
+void Graphics::OnKeyDown(KeyCode keyCode) {
+	if (keyCode == KeyCode::Num1) {
+		m_isWireframe = !m_isWireframe;
+	}
+}
+
+void Graphics::BuildDefaultPSO() {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc;
     ZeroMemory(&psoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
     psoDesc.InputLayout = { m_inputLayout.data(), (UINT)m_inputLayout.size() };
@@ -670,6 +729,59 @@ void Graphics::BuildPSO() {
     psoDesc.SampleDesc.Quality = m_4xMsaaState ? (m_4xMsaaQuality - 1) : 0;
     psoDesc.DSVFormat = m_depthStencilFormat;
     ThrowIfFailed(m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_PSO)));
+
+	m_resourceManager->AddPSO("default", m_PSO);
+}
+
+void Graphics::BuildWireframePSO() {
+    // Start with the same PSO desc as the default PSO
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC wireframePsoDesc;
+    ZeroMemory(&wireframePsoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
+    wireframePsoDesc.InputLayout = { m_inputLayout.data(), (UINT)m_inputLayout.size() };
+    wireframePsoDesc.pRootSignature = m_rootSignature.Get();
+    wireframePsoDesc.VS =
+	{
+		reinterpret_cast<BYTE*>(m_vsByteCode->GetBufferPointer()),
+		m_vsByteCode->GetBufferSize()
+	};
+    wireframePsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(m_psByteCode->GetBufferPointer()),
+		m_psByteCode->GetBufferSize()
+	};
+    wireframePsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    wireframePsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    wireframePsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    wireframePsoDesc.SampleMask = UINT_MAX;
+    wireframePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    wireframePsoDesc.NumRenderTargets = 1;
+    wireframePsoDesc.RTVFormats[0] = m_backBufferFormat;
+    wireframePsoDesc.SampleDesc.Count = m_4xMsaaState ? 4 : 1;
+    wireframePsoDesc.SampleDesc.Quality = m_4xMsaaState ? (m_4xMsaaQuality - 1) : 0;
+    wireframePsoDesc.DSVFormat = m_depthStencilFormat;
+
+    // Only change the fill mode to wireframe
+    wireframePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+
+    ThrowIfFailed(m_device->CreateGraphicsPipelineState(&wireframePsoDesc, IID_PPV_ARGS(&m_wireframePSO)));
+
+	m_resourceManager->AddPSO("wireframe", m_wireframePSO);
+}
+
+void Graphics::BuildPSOs() {
+	BuildDefaultPSO();
+	BuildWireframePSO();
+}
+
+void Graphics::BuildFrameResources() {
+	for (int i = 0; i < NumFrameResources; ++i) {
+		m_frameResources.push_back(UniquePtr<FrameResource>(
+			new FrameResource(m_device.Get(),
+				1,  // 1 pass CB
+				1,  // 1 object CB (for now, increase if you have more objects)
+				1)  // 1 material CB
+		));
+	}
 }
 
 void Graphics::LoadTextures() {
@@ -681,25 +793,25 @@ void Graphics::LoadTextures() {
 		woodCrateTex->resource, woodCrateTex->uploadHeap));
 
 	m_textures[woodCrateTex->name] = std::move(woodCrateTex);
-	
+
 	// Create SRV for the texture
 	CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptor(m_cbvHeap->GetCPUDescriptorHandleForHeapStart());
 	hDescriptor.Offset(1, m_cbvSrvUavDescriptorSize); // Offset by 1 to skip CBV
-	
+
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srvDesc.Format = m_textures["woodCrateTex"]->resource->GetDesc().Format;
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MostDetailedMip = 0;
 	srvDesc.Texture2D.MipLevels = m_textures["woodCrateTex"]->resource->GetDesc().MipLevels;
-	
+
 	m_device->CreateShaderResourceView(m_textures["woodCrateTex"]->resource.Get(), &srvDesc, hDescriptor);
 }
 
 std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> Graphics::GetStaticSamplers() {
 	// Applications usually only need a handful of samplers. So just define them all up front
 	// and keep them available as part of the root signature.
-	
+
 	const CD3DX12_STATIC_SAMPLER_DESC pointWrap(
 		0, // shaderRegister
 		D3D12_FILTER_MIN_MAG_MIP_POINT, // filter

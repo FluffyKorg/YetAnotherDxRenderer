@@ -196,6 +196,9 @@ void Application::HandleWindowClose() {
 }
 
 void Application::HandleKeyEvent(const KeyEvent& event) {
+    if (event.pressed && m_graphics) {
+        m_graphics->OnKeyDown(event.key);
+    }
     OnKeyEvent(event);
 }
 

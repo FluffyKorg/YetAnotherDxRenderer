@@ -7,6 +7,7 @@
 #include <ResourceManager.h>
 #include <StaticMesh.h>
 #include <RenderObject.h>
+#include <FrameResource.h>
 
 static DirectX::XMFLOAT4X4 Identity4x4() {
 	static DirectX::XMFLOAT4X4 I(
@@ -23,8 +24,6 @@ struct LegacyVertex {
     DirectX::XMFLOAT3 Pos;
     DirectX::XMFLOAT4 Color;
 };
-
-// ObjectConstants now defined in RenderObject.h
 
 class Graphics {
 public:
@@ -46,6 +45,7 @@ public:
     void OnMouseDown(MouseButton button, int32 x, int32 y);
     void OnMouseUp(MouseButton button, int32 x, int32 y);
     void OnMouseMove(int32 x, int32 y);
+	void OnKeyDown(KeyCode keyCode);
 
 	void OnResize();
 private:
@@ -60,15 +60,23 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView() const;
 
 	void BuildBoxGeometry();
-    void BuildPSO();
+    void BuildPSOs();
+	void BuildDefaultPSO();
+	void BuildWireframePSO();
+	void BuildFrameResources();
 
     // Textures
-
     void LoadTextures();
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
 private:
 	Window* m_window = nullptr;
+
+	// Frame Resources for CPU-GPU parallelism
+	static const int NumFrameResources = 3;
+	Vector<UniquePtr<FrameResource>> m_frameResources;
+	FrameResource* m_currFrameResource = nullptr;
+	int m_currFrameResourceIndex = 0;
 
 	// New render system
 	UniquePtr<ResourceManager> m_resourceManager;
@@ -83,7 +91,9 @@ private:
     ComPtr<ID3D12Resource> m_swapChainBuffer[m_swapChainBufferCount];
     ComPtr<ID3D12Resource> m_depthStencilBuffer;
 
-	ComPtr<ID3D12PipelineState> m_PSO = nullptr;
+	ComPtr<ID3D12PipelineState> m_PSO = nullptr; // For now it's a default opaque PSO
+	ComPtr<ID3D12PipelineState> m_wireframePSO = nullptr;
+	bool m_isWireframe = false;
 
     HashMap<String, UniquePtr<Texture>> m_textures;
 
@@ -93,7 +103,7 @@ private:
     ComPtr<IDXGIFactory4> m_dxgiFactory;
 
     ComPtr<ID3D12CommandQueue> m_commandQueue;
-    ComPtr<ID3D12CommandAllocator> m_directCmdListAlloc;
+    ComPtr<ID3D12CommandAllocator> m_directCmdListAlloc;  // For initialization and resize
     ComPtr<ID3D12GraphicsCommandList> m_commandList;
 
     ComPtr<ID3D12DescriptorHeap> m_rtvHeap;

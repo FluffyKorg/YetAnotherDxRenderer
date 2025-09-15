@@ -76,8 +76,10 @@ public:
     void Update(float deltaTime, const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& proj) override {
         static_cast<Derived*>(this)->UpdateInternal(deltaTime);
 
-        // Always update constants since camera can change every frame
-        UpdateConstants(view, proj);
+        // Only update constants if we have our own CB (not using FrameResource)
+        if (m_objectCB) {
+            UpdateConstants(view, proj);
+        }
         m_isDirty = false;
         m_constantsDirty = false;
     }

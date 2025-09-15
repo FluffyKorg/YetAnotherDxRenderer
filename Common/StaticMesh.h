@@ -34,6 +34,8 @@ public:
     void UpdateInternal(float deltaTime) {
         // Can be overridden for specific update logic
         // For example: animation, rotation, etc.
+        // Note: Constant buffer updates are now handled in Graphics::Update
+        // using FrameResource
     }
     
     void PrepareRender(ID3D12GraphicsCommandList* cmdList) {
@@ -50,10 +52,13 @@ public:
         // For now, use descriptor table for compatibility with existing root signature
         // The constant buffer is already bound via descriptor heap in Graphics::DrawFrame
         
-        // Bind material PSO
-        if (m_material->GetPSO()) {
-            cmdList->SetPipelineState(m_material->GetPSO());
-        }
+        // Don't override PSO if wireframe mode might be active
+        // PSO is already set in Graphics::DrawFrame based on wireframe state
+        // Only set material PSO if it's different from default (for special materials)
+        // Commented out for now to allow wireframe mode to work properly
+        // if (m_material->GetPSO()) {
+        //     cmdList->SetPipelineState(m_material->GetPSO());
+        // }
         
         // Note: Material constants and textures binding commented out 
         // until we extend the root signature
@@ -84,9 +89,10 @@ public:
     SharedPtr<ITextureComponent> GetTextures() const { return m_textures; }
     const String& GetSubmeshName() const { return m_submeshName; }
     
-    D3D12_GPU_VIRTUAL_ADDRESS GetConstantBufferAddress() const {
-        return RenderObject<StaticMesh>::GetConstantBufferAddress();
-    }
+    // Removed GetConstantBufferAddress - now using FrameResource CBs
+    // D3D12_GPU_VIRTUAL_ADDRESS GetConstantBufferAddress() const {
+    //     return RenderObject<StaticMesh>::GetConstantBufferAddress();
+    // }
     
 private:
     SharedPtr<IMeshComponent> m_mesh;
